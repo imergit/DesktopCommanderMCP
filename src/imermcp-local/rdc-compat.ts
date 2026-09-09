@@ -103,17 +103,12 @@ export async function handleRdcFacadeTool(name: string): Promise<ServerResult> {
 
 export function scheduleLocalShutdown(closeServer: () => Promise<void>): void {
   const timer = setTimeout(() => {
-    let settled = false;
-    const hardStop = setTimeout(() => {
-      if (!settled) process.exit(0);
-    }, 1500);
+    setTimeout(() => process.exit(0), 1500);
     void closeServer()
       .catch(error => {
         process.stderr.write(`ImerMCP-Local graceful shutdown failed: ${String(error)}\n`);
       })
       .finally(() => {
-        settled = true;
-        clearTimeout(hardStop);
         process.exitCode = 0;
       });
   }, 100);

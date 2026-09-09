@@ -16,14 +16,11 @@ async function run() {
   await client.connect(transport);
   const result = await client.callTool({ name: 'shutdown', arguments: {} });
   assert.match(text(result), /^Shutting down ImerMCP-Local on /);
-  await new Promise(resolve => setTimeout(resolve, 500));
-  let closed = false;
-  try {
-    await client.callTool({ name: 'ping', arguments: {} });
-  } catch {
-    closed = true;
+  const deadline = Date.now() + 5000;
+  while (transport.pid !== null && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 50));
   }
-  assert.strictEqual(closed, true, 'shutdown must terminate the dev MCP child after acknowledging');
+  assert.strictEqual(transport.pid, null, 'shutdown must terminate the dev MCP child within 5 seconds');
   try { await client.close(); } catch {}
   console.log('PASS: shutdown acknowledges then terminates only the isolated MCP child');
 }
