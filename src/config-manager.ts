@@ -209,11 +209,23 @@ class ConfigManager {
     throw lastError;
   }
 
+  private async replaceConfigFileWithRetry(tempPath: string): Promise<void> {
+    const transientWindowsErrors = new Set(['EPERM', 'EACCES', 'EBUSY']);
+    const maxAttempts = 100;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try { await fs.rename(tempPath, this.configPath); return; }
+      catch (error: any) {
+        if (os.platform() !== 'win32' || !transientWindowsErrors.has(error?.code) || attempt === maxAttempts) throw error;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(attempt * 5, 50)));
+      }
+    }
+  }
+
   private async writeConfigAtomically(config: ServerConfig): Promise<void> {
     const tempPath = `${this.configPath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
     try {
       await fs.writeFile(tempPath, JSON.stringify(config, null, 2), 'utf8');
-      await fs.rename(tempPath, this.configPath);
+      await this.replaceConfigFileWithRetry(tempPath);
     } finally {
       await fs.unlink(tempPath).catch(() => {});
     }
