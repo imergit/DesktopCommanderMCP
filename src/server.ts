@@ -85,6 +85,11 @@ import {
     handleRdcFacadeTool,
     scheduleLocalShutdown,
 } from './imermcp-local/rdc-compat.js';
+import {
+    getImerTermTools,
+    handleImerTermTool,
+    isImerTermEnabled,
+} from './imermcp-local/imerterm-tools.js';
 
 // Store startup messages to send after initialization
 const deferredMessages: Array<{ level: string, message: string }> = [];
@@ -1242,7 +1247,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 
         // Preserve the upstream engine internally while exposing the RDC-compatible northbound facade.
         const exposedTools = allTools.map(tool => exposeRdcCompatibleTool(tool));
-        const filteredTools = [...exposedTools, ...getRdcFacadeTools()].filter(tool => shouldIncludeTool(tool.name));
+        const additiveImerTermTools = isImerTermEnabled() ? getImerTermTools() : [];
+        const filteredTools = [...exposedTools, ...getRdcFacadeTools(), ...additiveImerTermTools].filter(tool => shouldIncludeTool(tool.name));
 
         // logToStderr('debug', `Returning ${filteredTools.length} tools (filtered from ${allTools.length} total) for client: ${currentClient?.name || 'unknown'}`);
 
@@ -1337,6 +1343,18 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
         // (result is declared above so the finally block can read execution status)
 
         switch (name) {
+            // Additive ImerTerm governed execution/task tools
+            case 'imerterm_capabilities':
+            case 'imerterm_run_powershell':
+            case 'imerterm_run_ssh':
+            case 'imerterm_run_routeros':
+            case 'imerterm_task_show':
+            case 'imerterm_task_wait':
+            case 'imerterm_task_cancel':
+            case 'imerterm_task_journal':
+                result = await handleImerTermTool(name, args);
+                break;
+
             // RDC compatibility facade tools
             case 'list_devices':
             case 'who_am_i':
