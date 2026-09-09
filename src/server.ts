@@ -104,7 +104,7 @@ deferLog('info', 'Loading server.ts');
 
 export const server = new Server(
     {
-        name: "desktop-commander",
+        name: "ImerMCP-Local",
         version: VERSION,
     },
     {
@@ -272,7 +272,7 @@ server.setRequestHandler(InitializeRequestSchema, async (request: InitializeRequ
                 logging: {},
             },
             serverInfo: {
-                name: "desktop-commander",
+                name: "ImerMCP-Local",
                 version: VERSION,
             },
         };

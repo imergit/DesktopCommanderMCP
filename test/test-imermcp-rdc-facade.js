@@ -5,6 +5,10 @@ import path from 'path';
 import fsp from 'fs/promises';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { fileURLToPath } from 'node:url';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const entry = path.resolve(here, '..', 'dist', 'index.js');
 
 const expectedRemoteOnly = ['list_devices', 'who_am_i', 'ping', 'shutdown'];
 const expectedLocal = [
@@ -21,7 +25,7 @@ const parseJsonText = result => JSON.parse(text(result));
 
 async function run() {
   const client = new Client({ name: 'imermcp-rdc-facade-test', version: '1.0.0' }, { capabilities: {} });
-  const transport = new StdioClientTransport({ command: 'node', args: ['../dist/index.js'] });
+  const transport = new StdioClientTransport({ command: 'node', args: [entry] });
   await client.connect(transport);
   const listed = await client.listTools();
   const names = listed.tools.map(t => t.name).sort();
