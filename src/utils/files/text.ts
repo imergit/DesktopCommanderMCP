@@ -271,6 +271,7 @@ export class TextFileHandler implements FileHandler {
             let position = fileSize;
             let lines: string[] = [];
             let partialLine = '';
+            let firstChunkFromEnd = true;
 
             while (position > 0 && lines.length < n) {
                 if (signal?.aborted) {
@@ -289,6 +290,10 @@ export class TextFileHandler implements FileHandler {
                 const chunkLines = text.split('\n');
 
                 partialLine = chunkLines.shift() || '';
+                if (firstChunkFromEnd && chunkLines[chunkLines.length - 1] === '') {
+                    chunkLines.pop();
+                }
+                firstChunkFromEnd = false;
                 lines = chunkLines.concat(lines);
             }
 
