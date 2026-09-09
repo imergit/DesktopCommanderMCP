@@ -78,6 +78,13 @@ import {
 } from './ui/contracts.js';
 import { listUiResources, readUiResource } from './ui/resources.js';
 import { shouldShowMcpUiPreviews } from './utils/mcp-ui-ab-test.js';
+import {
+    exposeRdcCompatibleTool,
+    getRdcFacadeTools,
+    normalizeRdcCompatibleArgs,
+    handleRdcFacadeTool,
+    scheduleLocalShutdown,
+} from './imermcp-local/rdc-compat.js';
 
 // Store startup messages to send after initialization
 const deferredMessages: Array<{ level: string, message: string }> = [];
@@ -1233,8 +1240,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             }
         ];
 
-        // Filter tools based on current client
-        const filteredTools = allTools.filter(tool => shouldIncludeTool(tool.name));
+        // Preserve the upstream engine internally while exposing the RDC-compatible northbound facade.
+        const exposedTools = allTools.map(tool => exposeRdcCompatibleTool(tool));
+        const filteredTools = [...exposedTools, ...getRdcFacadeTools()].filter(tool => shouldIncludeTool(tool.name));
 
         // logToStderr('debug', `Returning ${filteredTools.length} tools (filtered from ${allTools.length} total) for client: ${currentClient?.name || 'unknown'}`);
 
@@ -1266,7 +1274,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest)
 });
 
 async function handleCallToolRequest(request: CallToolRequest): Promise<ServerResult> {
-    const { name, arguments: args } = request.params;
+    const { name } = request.params;
+    let args = request.params.arguments;
     const startTime = Date.now();
     // Hoisted above the try so the finally block can read them when emitting the
     // server_call_tool completion event (duration + status), even on the crash path.
@@ -1275,6 +1284,7 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
     let isError = false;
 
     try {
+        args = normalizeRdcCompatibleArgs(name, args);
         // telemetryData declared above; extract metadata from _meta field if present
         const metadata = request.params._meta as any;
         // Reset remote attribution for every call so a prior remote call never
@@ -1327,6 +1337,14 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
         // (result is declared above so the finally block can read execution status)
 
         switch (name) {
+            // RDC compatibility facade tools
+            case 'list_devices':
+            case 'who_am_i':
+            case 'ping':
+            case 'shutdown':
+                result = await handleRdcFacadeTool(name);
+                break;
+
             // Config tools
             case "get_config":
                 try {
@@ -1664,6 +1682,12 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
             // Never let the advisory warning break an otherwise-successful call.
         }
 
+        if (name === 'shutdown' && !result.isError) {
+            scheduleLocalShutdown(async () => {
+                await server.close();
+                (global as any).mcpTransport?.cleanup?.();
+            });
+        }
         return result;
     } catch (error) {
         isError = true;
