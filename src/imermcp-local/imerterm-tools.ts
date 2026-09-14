@@ -63,7 +63,7 @@ export function getImerTermTools(): any[] {
     },
     {
       name: 'imerterm_run_ssh',
-      description: 'Dispatch governed Bash through an ImerTerm-qualified OpenSSH target. SSH lifecycle, attestation and execution remain owned by ImerTerm.',
+      description: 'Dispatch governed Bash through an ImerTerm-qualified OpenSSH target. Defaults to V1_RAW for backward compatibility; V2_STRUCTURED is explicit, capability-gated and never auto-falls back. SSH lifecycle, attestation and execution remain owned by ImerTerm.',
       inputSchema: {
         type: 'object',
         properties: {
