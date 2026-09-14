@@ -7,6 +7,9 @@ import {
   ImerTermAdapterError,
   isImerTermEnabled,
 } from './imerterm-client.js';
+import {
+  buildOperationalHandshake, ImerTermPolicyError, requestValidationError, requireAcceptedHandshake, requireAdvertisedValue,
+} from './imerterm-policy.js';
 
 const names = new Set([
   'imerterm_capabilities',
@@ -42,10 +45,10 @@ function baseTaskProperties(): Record<string, unknown> {
 
 export function getImerTermTools(): any[] {
   return [
-    { name: 'imerterm_capabilities', description: 'Read the running ImerTerm Host machine-first capabilities handshake. No execution occurs.', inputSchema: emptySchema, annotations: { title: 'ImerTerm Capabilities', readOnlyHint: true } },
+    { name: 'imerterm_capabilities', description: 'Mandatory read-only operational handshake before ImerTerm effect/control. Returns native Host capabilities, exact manual/interop bindings, the full hash-verified operations manual, rule status and AI recovery guidance. If accepted=false, do not dispatch: follow safe_next_action and refresh this diagnostic handshake; never bypass or auto-fallback.', inputSchema: emptySchema, annotations: { title: 'ImerTerm Capabilities', readOnlyHint: true } },
     {
       name: 'imerterm_run_powershell',
-      description: 'Dispatch governed Windows PowerShell through the existing ImerTerm authority. ImerMCP does not execute or reinterpret the script.',
+      description: 'Dispatch governed Windows PowerShell only after an accepted ImerTerm operational handshake. ImerMCP does not execute or reinterpret the script. Policy rejection reports reason, exact rule authority and safe_next_action; never bypass ImerTerm or infer unadvertised capabilities.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -64,7 +67,7 @@ export function getImerTermTools(): any[] {
     },
     {
       name: 'imerterm_run_ssh',
-      description: 'Dispatch governed Bash through an ImerTerm-qualified OpenSSH target. Defaults to V1_RAW for backward compatibility; V2_STRUCTURED is explicit, capability-gated and never auto-falls back. SSH lifecycle, attestation and execution remain owned by ImerTerm.',
+      description: 'Dispatch governed Bash only after an accepted ImerTerm operational handshake. V1_RAW remains independently valid; V2_STRUCTURED is explicit, conjunctively capability-gated and never auto-falls back. Policy rejection reports reason/rule/safe_next_action. SSH lifecycle, attestation and execution remain owned by ImerTerm.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -85,7 +88,7 @@ export function getImerTermTools(): any[] {
     },
     {
       name: 'imerterm_run_routeros',
-      description: 'Dispatch a RouterOS command through the existing governed ImerTerm RouterOS authority.',
+      description: 'Dispatch RouterOS only after an accepted ImerTerm operational handshake and advertised target. Policy rejection reports reason/rule/safe_next_action. Never bypass ImerTerm with direct RouterOS CLI.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -119,64 +122,60 @@ export function getImerTermTools(): any[] {
 }
 
 function asObject(args: unknown): Record<string, unknown> {
-  if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Tool arguments must be an object.');
+  if (!args || typeof args !== 'object' || Array.isArray(args)) throw requestValidationError('Tool arguments must be an object.');
   return args as Record<string, unknown>;
 }
 function requiredString(args: Record<string, unknown>, key: string): string {
   const value = args[key];
-  if (typeof value !== 'string' || value.length === 0) throw new Error(`${key} is required.`);
+  if (typeof value !== 'string' || value.length === 0) throw requestValidationError(`${key} is required.`);
   return value;
 }
 function optionalInt(args: Record<string, unknown>, key: string, fallback?: number): number | undefined {
   const value = args[key];
   if (value === undefined) return fallback;
-  if (typeof value !== 'number' || !Number.isInteger(value)) throw new Error(`${key} must be an integer.`);
+  if (typeof value !== 'number' || !Number.isInteger(value)) throw requestValidationError(`${key} must be an integer.`);
   return value;
 }
 function taskId(args: Record<string, unknown>): string {
   const value = args.task_id;
   if (value === undefined) return randomUUID();
-  if (typeof value !== 'string' || !/^[0-9a-fA-F-]{36}$/.test(value)) throw new Error('task_id must be a UUID string.');
+  if (typeof value !== 'string' || !/^[0-9a-fA-F-]{36}$/.test(value)) throw requestValidationError('task_id must be a UUID string.');
   return value;
 }
 function responseResult(value: Record<string, unknown>): ServerResult {
   return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }], structuredContent: value };
 }
 function errorResult(error: unknown): ServerResult {
-  const code = error instanceof ImerTermAdapterError ? error.code : 'ADAPTER_ERROR';
+  const code = error instanceof ImerTermPolicyError ? error.rejection.reason_code : error instanceof ImerTermAdapterError ? error.code : 'ADAPTER_ERROR';
   const message = error instanceof Error ? error.message : String(error);
   const body: Record<string, unknown> = { schema: 'imermcp.imerterm_error/1', error_class: code, message };
+  if (error instanceof ImerTermPolicyError) {
+    Object.assign(body, error.rejection);
+    if (error.handshake) body.operational_handshake = error.handshake;
+  }
   if (error instanceof ImerTermAdapterError) {
     if (error.exitCode !== undefined) body.exit_code = error.exitCode;
     if (error.nativeResponse !== undefined) body.native_response = error.nativeResponse;
   }
   return { content: [{ type: 'text', text: JSON.stringify(body, null, 2) }], structuredContent: body, isError: true };
 }
-function capabilitiesObject(response: Record<string, unknown>): Record<string, unknown> {
-  if (response.status !== 'CONTROL_OK' || response.result_code !== 'CAPABILITIES') throw new Error('ImerTerm capabilities handshake failed.');
-  const capabilities = response.capabilities;
-  if (!capabilities || typeof capabilities !== 'object' || Array.isArray(capabilities)) throw new Error('ImerTerm capabilities object is missing.');
-  const caps = capabilities as Record<string, unknown>;
-  if (caps.protocol_epoch !== 1) throw new Error('ImerTerm protocol epoch is incompatible.');
-  return caps;
+async function operationalHandshake(): Promise<{ response: Record<string, unknown>; caps: Record<string, unknown> }> {
+  const response = await getImerTermCapabilities();
+  const handshake = await buildOperationalHandshake(response);
+  return { response, caps: requireAcceptedHandshake(handshake) };
 }
-function arrayHas(caps: Record<string, unknown>, key: string, value: string): boolean {
-  const list = caps[key];
-  return Array.isArray(list) && list.includes(value);
-}
-async function requireCapabilities(schema?: string, feature?: string, targetKey?: string, targetId?: string): Promise<Record<string, unknown>> {
-  const caps = capabilitiesObject(await getImerTermCapabilities());
-  if (schema && !arrayHas(caps, 'dispatch_schemas', schema)) throw new Error(`Running ImerTerm Host does not accept ${schema}.`);
-  if (feature && !arrayHas(caps, 'features', feature)) throw new Error(`Running ImerTerm Host does not advertise ${feature}.`);
-  if (targetKey && targetId && !arrayHas(caps, targetKey, targetId)) throw new Error(`Running ImerTerm Host does not expose target ${targetId} in ${targetKey}.`);
-  return caps;
+async function diagnosticCapabilitiesResponse(): Promise<Record<string, unknown>> {
+  const response = await getImerTermCapabilities();
+  const handshake = await buildOperationalHandshake(response);
+  return { ...response, imermcp_operational_handshake: handshake };
 }
 function taskEnvelope(args: Record<string, unknown>, kind: string): Record<string, unknown> {
   const createdAt = args.created_at_utc === undefined ? new Date().toISOString() : requiredString(args, 'created_at_utc');
   return { schema: 'imerterm.task/1', task_id: taskId(args), project_id: requiredString(args, 'project_id'), target_id: requiredString(args, 'target_id'), task_kind: kind, created_at_utc: createdAt };
 }
 async function runPowerShell(args: Record<string, unknown>): Promise<Record<string, unknown>> {
-  await requireCapabilities('imerterm.powershell_dispatch/1');
+  const { caps } = await operationalHandshake();
+  requireAdvertisedValue(caps, 'dispatch_schemas', 'imerterm.powershell_dispatch/1', 'contract.v1.3.southbound_binding.dispatch.schemas', 'IMERTERM_OPERATION_SCHEMA_MISSING', 'Refresh Capabilities. Do not infer PowerShell V2 and do not bypass ImerTerm.');
   const task = taskEnvelope(args, 'POWERSHELL');
   return await dispatchImerTerm({
     schema: 'imerterm.powershell_dispatch/1', task,
@@ -191,56 +190,56 @@ async function runPowerShell(args: Record<string, unknown>): Promise<Record<stri
 }
 
 function requireCapabilityValue(caps: Record<string, unknown>, key: string, value: string, message: string): void {
-  if (!arrayHas(caps, key, value)) throw new Error(message);
+  requireAdvertisedValue(caps, key, value, 'contract.v1.3.capability_gates', 'IMERTERM_OPERATION_CAPABILITY_MISSING', `${message} Refresh Capabilities and stop if it remains absent; never use an implicit fallback or bypass.`);
 }
 function optionalMode(args: Record<string, unknown>): 'V1_RAW' | 'V2_STRUCTURED' {
   const value = args.dispatch_mode;
   if (value === undefined) return 'V1_RAW';
-  if (value !== 'V1_RAW' && value !== 'V2_STRUCTURED') throw new Error('dispatch_mode must be V1_RAW or V2_STRUCTURED.');
+  if (value !== 'V1_RAW' && value !== 'V2_STRUCTURED') throw requestValidationError('dispatch_mode must be V1_RAW or V2_STRUCTURED.');
   return value;
 }
 function structuredArguments(args: Record<string, unknown>): Record<string, unknown>[] {
   const value = args.arguments;
-  if (!Array.isArray(value)) throw new Error('arguments must be an array for V2_STRUCTURED.');
+  if (!Array.isArray(value)) throw requestValidationError('arguments must be an array for V2_STRUCTURED.');
   return value.map((entry, index) => {
-    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`arguments[${index}] must be an object.`);
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw requestValidationError(`arguments[${index}] must be an object.`);
     const item = entry as Record<string, unknown>;
     const kind = requiredString(item, 'kind');
     if (kind === 'LITERAL') {
-      if (typeof item.value !== 'string') throw new Error(`arguments[${index}].value is required for LITERAL.`);
-      if (item.artifact_id !== undefined) throw new Error(`arguments[${index}].artifact_id is forbidden for LITERAL.`);
+      if (typeof item.value !== 'string') throw requestValidationError(`arguments[${index}].value is required for LITERAL.`);
+      if (item.artifact_id !== undefined) throw requestValidationError(`arguments[${index}].artifact_id is forbidden for LITERAL.`);
       return { kind, value: item.value };
     }
     if (kind === 'ARTIFACT_PATH') {
       const artifactId = requiredString(item, 'artifact_id');
-      if (item.value !== undefined) throw new Error(`arguments[${index}].value is forbidden for ARTIFACT_PATH.`);
+      if (item.value !== undefined) throw requestValidationError(`arguments[${index}].value is forbidden for ARTIFACT_PATH.`);
       return { kind, artifact_id: artifactId };
     }
-    throw new Error(`arguments[${index}].kind must be LITERAL or ARTIFACT_PATH.`);
+    throw requestValidationError(`arguments[${index}].kind must be LITERAL or ARTIFACT_PATH.`);
   });
 }
 function structuredArtifacts(args: Record<string, unknown>): Record<string, unknown>[] {
   const value = args.artifacts;
-  if (!Array.isArray(value)) throw new Error('artifacts must be an array for V2_STRUCTURED.');
-  if (value.length > 32) throw new Error('artifacts exceeds the ImerTerm maximum of 32.');
+  if (!Array.isArray(value)) throw requestValidationError('artifacts must be an array for V2_STRUCTURED.');
+  if (value.length > 32) throw requestValidationError('artifacts exceeds the ImerTerm maximum of 32.');
   let totalBytes = 0;
   const seen = new Set<string>();
   return value.map((entry, index) => {
-    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`artifacts[${index}] must be an object.`);
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw requestValidationError(`artifacts[${index}] must be an object.`);
     const item = entry as Record<string, unknown>;
     const artifactId = requiredString(item, 'artifact_id');
-    if (artifactId.includes('..') || artifactId.includes('/') || artifactId.includes('\\')) throw new Error(`artifacts[${index}].artifact_id contains path syntax.`);
-    if (seen.has(artifactId)) throw new Error(`Duplicate artifact_id: ${artifactId}.`);
+    if (artifactId.includes('..') || artifactId.includes('/') || artifactId.includes('\\')) throw requestValidationError(`artifacts[${index}].artifact_id contains path syntax.`);
+    if (seen.has(artifactId)) throw requestValidationError(`Duplicate artifact_id: ${artifactId}.`);
     seen.add(artifactId);
     const sourceKind = requiredString(item, 'source_kind');
-    if (sourceKind !== 'LOCAL_FILE') throw new Error(`artifacts[${index}].source_kind must be LOCAL_FILE.`);
+    if (sourceKind !== 'LOCAL_FILE') throw requestValidationError(`artifacts[${index}].source_kind must be LOCAL_FILE.`);
     const sourcePath = requiredString(item, 'source_path');
     const byteLength = item.byte_length;
-    if (typeof byteLength !== 'number' || !Number.isSafeInteger(byteLength) || byteLength < 0 || byteLength > 536870912) throw new Error(`artifacts[${index}].byte_length must be an integer between 0 and 536870912.`);
+    if (typeof byteLength !== 'number' || !Number.isSafeInteger(byteLength) || byteLength < 0 || byteLength > 536870912) throw requestValidationError(`artifacts[${index}].byte_length must be an integer between 0 and 536870912.`);
     totalBytes += byteLength;
-    if (totalBytes > 1073741824) throw new Error('Total artifact bytes exceeds the ImerTerm maximum of 1073741824.');
+    if (totalBytes > 1073741824) throw requestValidationError('Total artifact bytes exceeds the ImerTerm maximum of 1073741824.');
     const sha256 = requiredString(item, 'sha256');
-    if (!/^[0-9a-fA-F]{64}$/.test(sha256)) throw new Error(`artifacts[${index}].sha256 must be 64 hexadecimal characters.`);
+    if (!/^[0-9a-fA-F]{64}$/.test(sha256)) throw requestValidationError(`artifacts[${index}].sha256 must be 64 hexadecimal characters.`);
     return { artifact_id: artifactId, source_kind: sourceKind, source_path: sourcePath, byte_length: byteLength, sha256: sha256.toLowerCase() };
   });
 }
@@ -249,12 +248,12 @@ export function buildSshDispatchForCapabilities(args: Record<string, unknown>, c
   const target = requiredString(args, 'target_id');
   const mode = optionalMode(args);
   const runtime = optionalInt(args, 'runtime_max_seconds');
-  requireCapabilityValue(caps, 'openssh_targets', target, `Running ImerTerm Host does not expose target ${target} in openssh_targets.`);
+  requireAdvertisedValue(caps, 'openssh_targets', target, 'manual.discovery_order.fail_closed', 'IMERTERM_TARGET_NOT_ADVERTISED', `Refresh Capabilities and choose an advertised OpenSSH target. Do not bypass ImerTerm to reach ${target}.`);
 
   if (mode === 'V1_RAW') {
     requireCapabilityValue(caps, 'dispatch_schemas', 'imerterm.bash_dispatch/1', 'Running ImerTerm Host does not accept imerterm.bash_dispatch/1.');
     requireCapabilityValue(caps, 'features', 'bash_dispatch_v1', 'Running ImerTerm Host does not advertise bash_dispatch_v1.');
-    for (const key of ['runtime_id', 'entrypoint_artifact_id', 'arguments', 'artifacts']) if (args[key] !== undefined) throw new Error(`${key} requires dispatch_mode=V2_STRUCTURED.`);
+    for (const key of ['runtime_id', 'entrypoint_artifact_id', 'arguments', 'artifacts']) if (args[key] !== undefined) throw requestValidationError(`${key} requires dispatch_mode=V2_STRUCTURED.`);
     const payload: Record<string, unknown> = {
       schema: 'imerterm.bash_dispatch/1', task: taskEnvelope(args, 'BASH'),
       mutation_class: requiredString(args, 'mutation_class'), run_as: requiredString(args, 'run_as'), script: requiredString(args, 'script'),
@@ -263,16 +262,16 @@ export function buildSshDispatchForCapabilities(args: Record<string, unknown>, c
     return { payload, timeoutMs: runtime ? runtime * 1000 + 15_000 : undefined };
   }
 
-  if (args.script !== undefined) throw new Error('script is forbidden for dispatch_mode=V2_STRUCTURED.');
-  for (const key of ['remote_path', 'executable']) if (args[key] !== undefined) throw new Error(`${key} is forbidden for dispatch_mode=V2_STRUCTURED.`);
+  if (args.script !== undefined) throw requestValidationError('script is forbidden for dispatch_mode=V2_STRUCTURED.');
+  for (const key of ['remote_path', 'executable']) if (args[key] !== undefined) throw requestValidationError(`${key} is forbidden for dispatch_mode=V2_STRUCTURED.`);
   requireCapabilityValue(caps, 'dispatch_schemas', 'imerterm.bash_dispatch/2', 'Running ImerTerm Host does not accept imerterm.bash_dispatch/2.');
   for (const feature of ['artifact_staging_v1', 'structured_dispatch_v2', 'structured_runtime_catalog_v1']) requireCapabilityValue(caps, 'features', feature, `Running ImerTerm Host does not advertise ${feature}.`);
   const artifacts = structuredArtifacts(args);
   const artifactIds = new Set(artifacts.map(item => String(item.artifact_id)));
   const entrypoint = requiredString(args, 'entrypoint_artifact_id');
-  if (!artifactIds.has(entrypoint)) throw new Error('entrypoint_artifact_id must reference one of artifacts[].artifact_id.');
+  if (!artifactIds.has(entrypoint)) throw requestValidationError('entrypoint_artifact_id must reference one of artifacts[].artifact_id.');
   const argumentsList = structuredArguments(args);
-  for (const item of argumentsList) if (item.kind === 'ARTIFACT_PATH' && !artifactIds.has(String(item.artifact_id))) throw new Error(`ARTIFACT_PATH references undeclared artifact_id: ${String(item.artifact_id)}.`);
+  for (const item of argumentsList) if (item.kind === 'ARTIFACT_PATH' && !artifactIds.has(String(item.artifact_id))) throw requestValidationError(`ARTIFACT_PATH references undeclared artifact_id: ${String(item.artifact_id)}.`);
   const payload: Record<string, unknown> = {
     schema: 'imerterm.bash_dispatch/2', task: taskEnvelope(args, 'BASH'),
     mutation_class: requiredString(args, 'mutation_class'), run_as: requiredString(args, 'run_as'),
@@ -284,14 +283,17 @@ export function buildSshDispatchForCapabilities(args: Record<string, unknown>, c
 }
 
 async function runSsh(args: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const caps = capabilitiesObject(await getImerTermCapabilities());
+  const { caps } = await operationalHandshake();
   const built = buildSshDispatchForCapabilities(args, caps);
   return await dispatchImerTerm(built.payload, built.timeoutMs);
 }
 
 async function runRouterOs(args: Record<string, unknown>): Promise<Record<string, unknown>> {
   const target = requiredString(args, 'target_id');
-  await requireCapabilities('imerterm.routeros_dispatch/1', 'routeros_dispatch_v1', 'routeros_targets', target);
+  const { caps } = await operationalHandshake();
+  requireAdvertisedValue(caps, 'dispatch_schemas', 'imerterm.routeros_dispatch/1', 'contract.v1.3.southbound_binding.dispatch.schemas', 'IMERTERM_OPERATION_SCHEMA_MISSING', 'Refresh Capabilities. Do not call RouterOS directly or bypass ImerTerm.');
+  requireAdvertisedValue(caps, 'features', 'routeros_dispatch_v1', 'manual.stable_cli.compatibility_rule', 'IMERTERM_OPERATION_FEATURE_MISSING', 'Refresh Capabilities. If routeros_dispatch_v1 remains absent, stop; do not use direct RouterOS CLI.');
+  requireAdvertisedValue(caps, 'routeros_targets', target, 'manual.discovery_order.fail_closed', 'IMERTERM_TARGET_NOT_ADVERTISED', `Refresh Capabilities and choose an advertised RouterOS target. Do not bypass ImerTerm to reach ${target}.`);
   return await dispatchImerTerm({
     schema: 'imerterm.routeros_dispatch/1',
     task: taskEnvelope(args, 'ROUTEROS'),
@@ -302,8 +304,10 @@ async function runRouterOs(args: Record<string, unknown>): Promise<Record<string
 
 async function taskControl(operation: 'TASK_SHOW' | 'TASK_CANCEL' | 'TASK_JOURNAL', id: string): Promise<Record<string, unknown>> {
   const feature = operation === 'TASK_SHOW' ? 'task_show_v1' : operation === 'TASK_CANCEL' ? 'task_cancel_v1' : 'task_journal_v1';
-  await requireCapabilities(undefined, 'task_control_v1');
-  await requireCapabilities(undefined, feature);
+  const { caps } = await operationalHandshake();
+  requireAdvertisedValue(caps, 'dispatch_schemas', 'imerterm.local_control/1', 'contract.v1.3.southbound_binding.control.schema', 'IMERTERM_CONTROL_SCHEMA_MISSING', 'Refresh Capabilities. Do not inspect or mutate SQLite directly as a substitute for ImerTerm control.');
+  requireAdvertisedValue(caps, 'features', 'task_control_v1', 'manual.stable_cli.compatibility_rule', 'IMERTERM_CONTROL_FEATURE_MISSING', 'Refresh Capabilities. Do not create a parallel task-control path.');
+  requireAdvertisedValue(caps, 'features', feature, 'manual.stable_cli.compatibility_rule', 'IMERTERM_CONTROL_FEATURE_MISSING', `Refresh Capabilities. ${operation} is unavailable until ${feature} is advertised.`);
   return await controlImerTerm({ schema: 'imerterm.local_control/1', operation, task_id: id });
 }
 async function waitForTask(args: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -327,7 +331,7 @@ export async function handleImerTermTool(name: string, rawArgs: unknown): Promis
   try {
     const args = name === 'imerterm_capabilities' ? {} : asObject(rawArgs);
     switch (name) {
-      case 'imerterm_capabilities': return responseResult(await getImerTermCapabilities());
+      case 'imerterm_capabilities': return responseResult(await diagnosticCapabilitiesResponse());
       case 'imerterm_run_powershell': return responseResult(await runPowerShell(args));
       case 'imerterm_run_ssh': return responseResult(await runSsh(args));
       case 'imerterm_run_routeros': return responseResult(await runRouterOs(args));
