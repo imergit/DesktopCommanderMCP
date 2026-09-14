@@ -7,6 +7,11 @@ import {
   ImerTermAdapterError,
   isImerTermEnabled,
 } from './imerterm-client.js';
+import {
+  evaluateOperationalGate,
+  OperationalGateError,
+  OPERATIONAL_POLICY,
+} from './imerterm-operational-gate.js';
 
 const names = new Set([
   'imerterm_capabilities',
@@ -140,12 +145,38 @@ function taskId(args: Record<string, unknown>): string {
   return value;
 }
 function responseResult(value: Record<string, unknown>): ServerResult {
-  return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }], structuredContent: value };
+  const candidates = [value, value.task, value.result].filter(v => v && typeof v === 'object' && !Array.isArray(v)) as Record<string, unknown>[];
+  const unknown = candidates.some(v => v.state === 'UNKNOWN_OUTCOME');
+  const body = unknown ? { ...value, operational_guidance: {
+    schema: 'imermcp.operational_guidance/1', reason_code: 'UNKNOWN_OUTCOME_NO_REPLAY', retryable: false,
+    next_allowed_action: 'Observe the existing task_id with imerterm_task_show and imerterm_task_journal; preserve the same durable identity.',
+    prohibited_actions: ['Do not replay the mutation.', 'Do not submit the same intended mutation under a new task_id.', 'Do not infer success from transport exit status.'],
+  }} : value;
+  return { content: [{ type: 'text', text: JSON.stringify(body, null, 2) }], structuredContent: body };
 }
 function errorResult(error: unknown): ServerResult {
+  if (error instanceof OperationalGateError) {
+    const body = error.gate as unknown as Record<string, unknown>;
+    return { content: [{ type: 'text', text: JSON.stringify(body, null, 2) }], structuredContent: body, isError: true };
+  }
   const code = error instanceof ImerTermAdapterError ? error.code : 'ADAPTER_ERROR';
   const message = error instanceof Error ? error.message : String(error);
-  const body: Record<string, unknown> = { schema: 'imermcp.imerterm_error/1', error_class: code, message };
+  const waitTimeout = code === 'WAIT_TIMEOUT';
+  const retryable = ['CONFIG_MISSING', 'CONFIG_INVALID', 'HOST_NOT_FOUND', 'SPAWN_FAILED', 'REQUEST_TOO_LARGE', 'DISABLED', 'UNKNOWN_TOOL', 'ADAPTER_ERROR'].includes(code);
+  const body: Record<string, unknown> = {
+    schema: 'imermcp.imerterm_error/1', error_class: code, message,
+    retryable,
+    next_allowed_action: waitTimeout
+      ? 'Observe the same task_id with imerterm_task_show, imerterm_task_wait or imerterm_task_journal.'
+      : retryable
+        ? 'Correct the stated pre-effect precondition, refresh Capabilities, and retry only the original intended operation.'
+        : 'Treat the effect state as uncertain until ImerTerm task state/journal proves otherwise; observe the original durable task identity.',
+    prohibited_actions: waitTimeout
+      ? ['Do not resubmit the mutation.', 'Do not allocate a new task_id for the same intent.', 'Do not infer cancellation or success from local wait timeout.']
+      : retryable
+        ? ['Do not bypass ImerTerm with a parallel execution path.', 'Do not change execution mode merely to bypass the error.']
+        : ['Do not blindly replay.', 'Do not allocate a new task_id for the same intent.', 'Do not infer success from transport/control exit status.'],
+  };
   if (error instanceof ImerTermAdapterError) {
     if (error.exitCode !== undefined) body.exit_code = error.exitCode;
     if (error.nativeResponse !== undefined) body.native_response = error.nativeResponse;
@@ -157,18 +188,12 @@ function capabilitiesObject(response: Record<string, unknown>): Record<string, u
   const capabilities = response.capabilities;
   if (!capabilities || typeof capabilities !== 'object' || Array.isArray(capabilities)) throw new Error('ImerTerm capabilities object is missing.');
   const caps = capabilities as Record<string, unknown>;
-  if (caps.protocol_epoch !== 1) throw new Error('ImerTerm protocol epoch is incompatible.');
+  evaluateOperationalGate(caps);
   return caps;
-}
-function arrayHas(caps: Record<string, unknown>, key: string, value: string): boolean {
-  const list = caps[key];
-  return Array.isArray(list) && list.includes(value);
 }
 async function requireCapabilities(schema?: string, feature?: string, targetKey?: string, targetId?: string): Promise<Record<string, unknown>> {
   const caps = capabilitiesObject(await getImerTermCapabilities());
-  if (schema && !arrayHas(caps, 'dispatch_schemas', schema)) throw new Error(`Running ImerTerm Host does not accept ${schema}.`);
-  if (feature && !arrayHas(caps, 'features', feature)) throw new Error(`Running ImerTerm Host does not advertise ${feature}.`);
-  if (targetKey && targetId && !arrayHas(caps, targetKey, targetId)) throw new Error(`Running ImerTerm Host does not expose target ${targetId} in ${targetKey}.`);
+  evaluateOperationalGate(caps, { dispatchSchema: schema, features: feature ? [feature] : undefined, targetKey, targetId });
   return caps;
 }
 function taskEnvelope(args: Record<string, unknown>, kind: string): Record<string, unknown> {
@@ -191,7 +216,10 @@ async function runPowerShell(args: Record<string, unknown>): Promise<Record<stri
 }
 
 function requireCapabilityValue(caps: Record<string, unknown>, key: string, value: string, message: string): void {
-  if (!arrayHas(caps, key, value)) throw new Error(message);
+  void message;
+  if (key === 'dispatch_schemas') evaluateOperationalGate(caps, { dispatchSchema: value });
+  else if (key === 'features') evaluateOperationalGate(caps, { features: [value] });
+  else evaluateOperationalGate(caps, { targetKey: key, targetId: value });
 }
 function optionalMode(args: Record<string, unknown>): 'V1_RAW' | 'V2_STRUCTURED' {
   const value = args.dispatch_mode;
@@ -322,12 +350,22 @@ async function waitForTask(args: Record<string, unknown>): Promise<Record<string
   }
 }
 
+async function operationalHandshake(): Promise<Record<string, unknown>> {
+  const liveResponse = await getImerTermCapabilities();
+  const caps = capabilitiesObject(liveResponse);
+  const gate = evaluateOperationalGate(caps);
+  return { ...liveResponse, operational_handshake: {
+    schema: 'imermcp.imerterm_operational_handshake/1', accepted: true,
+    result_code: gate.result_code, policy: OPERATIONAL_POLICY, gate,
+  }};
+}
+
 export async function handleImerTermTool(name: string, rawArgs: unknown): Promise<ServerResult> {
   if (!isImerTermEnabled()) return errorResult(new ImerTermAdapterError('DISABLED', 'ImerTerm adapter is not enabled.'));
   try {
     const args = name === 'imerterm_capabilities' ? {} : asObject(rawArgs);
     switch (name) {
-      case 'imerterm_capabilities': return responseResult(await getImerTermCapabilities());
+      case 'imerterm_capabilities': return responseResult(await operationalHandshake());
       case 'imerterm_run_powershell': return responseResult(await runPowerShell(args));
       case 'imerterm_run_ssh': return responseResult(await runSsh(args));
       case 'imerterm_run_routeros': return responseResult(await runRouterOs(args));
