@@ -295,8 +295,15 @@ export function buildSshDispatchForCapabilities(
     requireCapabilityValue(caps, 'features', feature, `Running ImerTerm Host does not advertise ${feature}.`);
   }
   const artifacts = structuredArtifacts(args);
+  const artifactIds = new Set(artifacts.map(item => String(item.artifact_id)));
   const entrypoint = requiredString(args, 'entrypoint_artifact_id');
-  if (!artifacts.some(item => item.artifact_id === entrypoint)) throw new Error('entrypoint_artifact_id must reference one of artifacts[].artifact_id.');
+  if (!artifactIds.has(entrypoint)) throw new Error('entrypoint_artifact_id must reference one of artifacts[].artifact_id.');
+  const argumentsList = structuredArguments(args);
+  for (const item of argumentsList) {
+    if (item.kind === 'ARTIFACT_PATH' && !artifactIds.has(String(item.artifact_id))) {
+      throw new Error(`ARTIFACT_PATH references undeclared artifact_id: ${String(item.artifact_id)}.`);
+    }
+  }
   const payload: Record<string, unknown> = {
     schema: 'imerterm.bash_dispatch/2',
     task: taskEnvelope(args, 'BASH'),
@@ -304,7 +311,7 @@ export function buildSshDispatchForCapabilities(
     run_as: requiredString(args, 'run_as'),
     runtime_id: requiredString(args, 'runtime_id'),
     entrypoint_artifact_id: entrypoint,
-    arguments: structuredArguments(args),
+    arguments: argumentsList,
     artifacts,
   };
   if (runtime !== undefined) payload.runtime_max_seconds = runtime;
