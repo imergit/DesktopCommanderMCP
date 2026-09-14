@@ -206,16 +206,115 @@ async function runPowerShell(args: Record<string, unknown>): Promise<Record<stri
   }, (optionalInt(args, 'timeout_ms', 300000) ?? 300000) + 15_000);
 }
 
-async function runSsh(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+function requireCapabilityValue(caps: Record<string, unknown>, key: string, value: string, message: string): void {
+  if (!arrayHas(caps, key, value)) throw new Error(message);
+}
+function optionalMode(args: Record<string, unknown>): 'V1_RAW' | 'V2_STRUCTURED' {
+  const value = args.dispatch_mode;
+  if (value === undefined) return 'V1_RAW';
+  if (value !== 'V1_RAW' && value !== 'V2_STRUCTURED') throw new Error('dispatch_mode must be V1_RAW or V2_STRUCTURED.');
+  return value;
+}
+function structuredArguments(args: Record<string, unknown>): Record<string, unknown>[] {
+  const value = args.arguments;
+  if (!Array.isArray(value)) throw new Error('arguments must be an array for V2_STRUCTURED.');
+  return value.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`arguments[${index}] must be an object.`);
+    const item = entry as Record<string, unknown>;
+    const kind = requiredString(item, 'kind');
+    if (kind === 'LITERAL') {
+      if (typeof item.value !== 'string') throw new Error(`arguments[${index}].value is required for LITERAL.`);
+      if (item.artifact_id !== undefined) throw new Error(`arguments[${index}].artifact_id is forbidden for LITERAL.`);
+      return { kind, value: item.value };
+    }
+    if (kind === 'ARTIFACT_PATH') {
+      const artifactId = requiredString(item, 'artifact_id');
+      if (item.value !== undefined) throw new Error(`arguments[${index}].value is forbidden for ARTIFACT_PATH.`);
+      return { kind, artifact_id: artifactId };
+    }
+    throw new Error(`arguments[${index}].kind must be LITERAL or ARTIFACT_PATH.`);
+  });
+}
+function structuredArtifacts(args: Record<string, unknown>): Record<string, unknown>[] {
+  const value = args.artifacts;
+  if (!Array.isArray(value)) throw new Error('artifacts must be an array for V2_STRUCTURED.');
+  if (value.length > 32) throw new Error('artifacts exceeds the ImerTerm maximum of 32.');
+  let totalBytes = 0;
+  const seen = new Set<string>();
+  return value.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`artifacts[${index}] must be an object.`);
+    const item = entry as Record<string, unknown>;
+    const artifactId = requiredString(item, 'artifact_id');
+    if (artifactId.includes('..') || artifactId.includes('/') || artifactId.includes('\\')) throw new Error(`artifacts[${index}].artifact_id contains path syntax.`);
+    if (seen.has(artifactId)) throw new Error(`Duplicate artifact_id: ${artifactId}.`);
+    seen.add(artifactId);
+    const sourceKind = requiredString(item, 'source_kind');
+    if (sourceKind !== 'LOCAL_FILE') throw new Error(`artifacts[${index}].source_kind must be LOCAL_FILE.`);
+    const sourcePath = requiredString(item, 'source_path');
+    const byteLength = item.byte_length;
+    if (typeof byteLength !== 'number' || !Number.isSafeInteger(byteLength) || byteLength < 0 || byteLength > 536870912) {
+      throw new Error(`artifacts[${index}].byte_length must be an integer between 0 and 536870912.`);
+    }
+    totalBytes += byteLength;
+    if (totalBytes > 1073741824) throw new Error('Total artifact bytes exceeds the ImerTerm maximum of 1073741824.');
+    const sha256 = requiredString(item, 'sha256');
+    if (!/^[0-9a-fA-F]{64}$/.test(sha256)) throw new Error(`artifacts[${index}].sha256 must be 64 hexadecimal characters.`);
+    return { artifact_id: artifactId, source_kind: sourceKind, source_path: sourcePath, byte_length: byteLength, sha256: sha256.toLowerCase() };
+  });
+}
+
+export function buildSshDispatchForCapabilities(
+  args: Record<string, unknown>,
+  caps: Record<string, unknown>,
+): { payload: Record<string, unknown>; timeoutMs?: number } {
   const target = requiredString(args, 'target_id');
-  await requireCapabilities('imerterm.bash_dispatch/1', 'bash_dispatch_v1', 'openssh_targets', target);
-  const payload: Record<string, unknown> = {
-    schema: 'imerterm.bash_dispatch/1', task: taskEnvelope(args, 'BASH'),
-    mutation_class: requiredString(args, 'mutation_class'), run_as: requiredString(args, 'run_as'), script: requiredString(args, 'script'),
-  };
+  const mode = optionalMode(args);
   const runtime = optionalInt(args, 'runtime_max_seconds');
+  requireCapabilityValue(caps, 'openssh_targets', target, `Running ImerTerm Host does not expose target ${target} in openssh_targets.`);
+
+  if (mode === 'V1_RAW') {
+    requireCapabilityValue(caps, 'dispatch_schemas', 'imerterm.bash_dispatch/1', 'Running ImerTerm Host does not accept imerterm.bash_dispatch/1.');
+    requireCapabilityValue(caps, 'features', 'bash_dispatch_v1', 'Running ImerTerm Host does not advertise bash_dispatch_v1.');
+    for (const key of ['runtime_id', 'entrypoint_artifact_id', 'arguments', 'artifacts']) {
+      if (args[key] !== undefined) throw new Error(`${key} requires dispatch_mode=V2_STRUCTURED.`);
+    }
+    const payload: Record<string, unknown> = {
+      schema: 'imerterm.bash_dispatch/1',
+      task: taskEnvelope(args, 'BASH'),
+      mutation_class: requiredString(args, 'mutation_class'),
+      run_as: requiredString(args, 'run_as'),
+      script: requiredString(args, 'script'),
+    };
+    if (runtime !== undefined) payload.runtime_max_seconds = runtime;
+    return { payload, timeoutMs: runtime ? runtime * 1000 + 15_000 : undefined };
+  }
+
+  if (args.script !== undefined) throw new Error('script is forbidden for dispatch_mode=V2_STRUCTURED.');
+  requireCapabilityValue(caps, 'dispatch_schemas', 'imerterm.bash_dispatch/2', 'Running ImerTerm Host does not accept imerterm.bash_dispatch/2.');
+  for (const feature of ['artifact_staging_v1', 'structured_dispatch_v2', 'structured_runtime_catalog_v1']) {
+    requireCapabilityValue(caps, 'features', feature, `Running ImerTerm Host does not advertise ${feature}.`);
+  }
+  const artifacts = structuredArtifacts(args);
+  const entrypoint = requiredString(args, 'entrypoint_artifact_id');
+  if (!artifacts.some(item => item.artifact_id === entrypoint)) throw new Error('entrypoint_artifact_id must reference one of artifacts[].artifact_id.');
+  const payload: Record<string, unknown> = {
+    schema: 'imerterm.bash_dispatch/2',
+    task: taskEnvelope(args, 'BASH'),
+    mutation_class: requiredString(args, 'mutation_class'),
+    run_as: requiredString(args, 'run_as'),
+    runtime_id: requiredString(args, 'runtime_id'),
+    entrypoint_artifact_id: entrypoint,
+    arguments: structuredArguments(args),
+    artifacts,
+  };
   if (runtime !== undefined) payload.runtime_max_seconds = runtime;
-  return await dispatchImerTerm(payload, runtime ? runtime * 1000 + 15_000 : undefined);
+  return { payload, timeoutMs: runtime ? runtime * 1000 + 15_000 : undefined };
+}
+
+async function runSsh(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const caps = capabilitiesObject(await getImerTermCapabilities());
+  const built = buildSshDispatchForCapabilities(args, caps);
+  return await dispatchImerTerm(built.payload, built.timeoutMs);
 }
 
 async function runRouterOs(args: Record<string, unknown>): Promise<Record<string, unknown>> {
