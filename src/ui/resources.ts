@@ -7,18 +7,19 @@ import { fileURLToPath } from 'url';
 import { CONFIG_EDITOR_RESOURCE_URI, FILE_PREVIEW_RESOURCE_URI } from './contracts.js';
 
 const UI_RESOURCE_MIME_TYPE = 'text/html;profile=mcp-app';
+const IMERMCP_MODE = process.env.IMERMCP_ENABLE_IMERTERM === '1';
 
 export const FILE_PREVIEW_RESOURCE = {
     uri: FILE_PREVIEW_RESOURCE_URI,
-    name: 'Desktop Commander File Preview',
+    name: IMERMCP_MODE ? 'ImerMCP File Preview' : 'Desktop Commander File Preview',
     description: 'Markdown-first preview surface for read_file structured content.',
     mimeType: UI_RESOURCE_MIME_TYPE
 };
 
 export const CONFIG_EDITOR_RESOURCE = {
     uri: CONFIG_EDITOR_RESOURCE_URI,
-    name: 'Desktop Commander Config Editor',
-    description: 'Interactive editor for Desktop Commander configuration values.',
+    name: IMERMCP_MODE ? 'ImerMCP Config Editor' : 'Desktop Commander Config Editor',
+    description: IMERMCP_MODE ? 'Interactive editor for isolated ImerMCP configuration values.' : 'Interactive editor for Desktop Commander configuration values.',
     mimeType: UI_RESOURCE_MIME_TYPE
 };
 
@@ -26,6 +27,15 @@ interface ReadableUiResource {
     mimeType: string;
     getText: () => Promise<string>;
     getMeta?: () => Record<string, unknown>;
+}
+
+function getImerMcpUiMeta(): Record<string, unknown> {
+    if (!IMERMCP_MODE) return {};
+    return { ui: { csp: { connectDomains: [], resourceDomains: [] } } };
+}
+
+function applyImerMcpBranding(html: string): string {
+    return IMERMCP_MODE ? html.split('Desktop Commander').join('ImerMCP') : html;
 }
 
 const __filename = fileURLToPath(import.meta.url);
@@ -80,21 +90,23 @@ async function readInlinedResourceHtml(distDir: string, runtimeFileName: string)
 }
 
 export async function getFilePreviewResourceText(): Promise<string> {
-    return readInlinedResourceHtml(DIST_FILE_PREVIEW_DIR, 'preview-runtime.js');
+    return applyImerMcpBranding(await readInlinedResourceHtml(DIST_FILE_PREVIEW_DIR, 'preview-runtime.js'));
 }
 
 export async function getConfigEditorResourceText(): Promise<string> {
-    return readInlinedResourceHtml(DIST_CONFIG_EDITOR_DIR, 'config-editor-runtime.js');
+    return applyImerMcpBranding(await readInlinedResourceHtml(DIST_CONFIG_EDITOR_DIR, 'config-editor-runtime.js'));
 }
 
 const READABLE_UI_RESOURCES: Record<string, ReadableUiResource> = {
     [FILE_PREVIEW_RESOURCE_URI]: {
         mimeType: FILE_PREVIEW_RESOURCE.mimeType,
-        getText: getFilePreviewResourceText
+        getText: getFilePreviewResourceText,
+        getMeta: getImerMcpUiMeta
     },
     [CONFIG_EDITOR_RESOURCE_URI]: {
         mimeType: CONFIG_EDITOR_RESOURCE.mimeType,
-        getText: getConfigEditorResourceText
+        getText: getConfigEditorResourceText,
+        getMeta: getImerMcpUiMeta
     }
 };
 
