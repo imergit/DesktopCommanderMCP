@@ -6,6 +6,7 @@ import { ServerResult } from '../types.js';
 import { analyzeProcessState, cleanProcessOutput, formatProcessStateMessage, ProcessState } from '../utils/process-detection.js';
 import * as os from 'os';
 import { configManager } from '../config-manager.js';
+import { evaluateImerMcpDirectTerminalRoute } from '../imermcp-local/rdc-effect-route.js';
 import { spawn } from 'child_process';
 import fs from 'fs/promises';
 import path from 'path';
@@ -115,6 +116,16 @@ export async function startProcess(args: unknown): Promise<ServerResult> {
     capture('server_start_process', {
       command: commandManager.getBaseCommand(parsed.data.command)
     });
+  }
+
+  const extractedCommands = commandManager.extractCommands(parsed.data.command);
+  if (extractedCommands.length === 0) extractedCommands.push(commandManager.getBaseCommand(parsed.data.command));
+  const governedRoute = evaluateImerMcpDirectTerminalRoute(extractedCommands);
+  if (governedRoute.route_required) {
+    return {
+      content: [{ type: 'text', text: JSON.stringify({ schema: 'imermcp.route_required/1', result_code: governedRoute.reason_code, accepted: false, matched_commands: governedRoute.matched_commands, rule: governedRoute.rule, next_allowed_tools: governedRoute.next_allowed_tools, prohibited_action: governedRoute.prohibited_action }, null, 2) }],
+      isError: true,
+    };
   }
 
   const isAllowed = await commandManager.validateCommand(parsed.data.command);
