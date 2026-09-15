@@ -28,6 +28,13 @@ export const OPERATIONAL_POLICY = {
     path: 'ImerSpine/resources/IMERTERM-OPERATIONS-MACHINE-FIRST-v1.4.0-20260913.json',
     sha256: '5b66e149810366e99cc5108461d711d26aec2e3da053aa1779152d85413d4a30',
   },
+  enforcement_model: {
+    live_handshake: ['protocol_epoch'],
+    live_per_operation: ['dispatch_schema', 'required_features', 'advertised_target'],
+    flow_enforced: ['capabilities_before_dispatch_or_control', 'structured_v2_all_gates', 'unknown_outcome_no_replay_guidance', 'imerterm_owned_task_lifecycle'],
+    static_policy_guidance: ['authority', 'project_preflight', 'command_construction', 'prohibited_parallel_apis', 'health', 'recovery', 'rdc_git', 'limits', 'secrets_and_evidence', 'provenance', 'known_limits'],
+    not_verified_is_not_pass: true,
+  },
   authority: {
     effect_authority: 'IMERTERM',
     transport_is_execution_authority: false,

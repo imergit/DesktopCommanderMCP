@@ -54,5 +54,9 @@ assert.equal(OPERATIONAL_POLICY.effect_semantics.unknown_outcome_automatic_repla
 assert.equal(OPERATIONAL_POLICY.rdc_git.wildcard_safe_directory_allowed, false);
 assert.equal(OPERATIONAL_POLICY.command_construction.dynamic_nested_shell_interpolation, false);
 assert.equal(OPERATIONAL_POLICY.prohibited_parallel_apis.direct_ssh_for_governed_targets, false);
+assert.equal(OPERATIONAL_POLICY.enforcement_model.not_verified_is_not_pass, true);
+assert.ok(OPERATIONAL_POLICY.enforcement_model.live_handshake.includes('protocol_epoch'));
+assert.ok(OPERATIONAL_POLICY.enforcement_model.live_per_operation.includes('advertised_target'));
+assert.ok(OPERATIONAL_POLICY.enforcement_model.static_policy_guidance.includes('project_preflight'));
 
 console.log('IMERMCP_OPERATIONAL_GATE_TEST_PASS');

@@ -356,7 +356,16 @@ async function operationalHandshake(): Promise<Record<string, unknown>> {
   const gate = evaluateOperationalGate(caps);
   return { ...liveResponse, operational_handshake: {
     schema: 'imermcp.imerterm_operational_handshake/1', accepted: true,
-    result_code: gate.result_code, policy: OPERATIONAL_POLICY, gate,
+    result_code: gate.result_code,
+    policy_binding: {
+      manual: OPERATIONAL_POLICY.source_manual,
+      binding_state: 'PINNED_ACCEPTED_BYTES',
+      live_manual_rehash_performed: false,
+      verification_rule: 'Policy/manual changes require content-addressed requalification; an unverified directive is never presented as PASS.',
+    },
+    enforcement_model: OPERATIONAL_POLICY.enforcement_model,
+    policy: OPERATIONAL_POLICY,
+    gate,
   }};
 }
 
