@@ -19,6 +19,7 @@ const names = new Set([
   'imerterm_run_ssh',
   'imerterm_run_routeros',
   'imerterm_task_show',
+  'imerterm_task_list',
   'imerterm_task_wait',
   'imerterm_task_cancel',
   'imerterm_task_journal',
@@ -61,6 +62,8 @@ export function getImerTermTools(): any[] {
           timeout_ms: { type: 'integer', minimum: 1, maximum: 3600000, default: 300000 },
           graceful_stop_ms: { type: 'integer', minimum: 0, maximum: 30000, default: 5000 },
           max_raw_output_bytes: { type: 'integer', minimum: 1, maximum: 268435456, default: 1048576 },
+          execution_mode: { type: 'string', enum: ['SYNC', 'ASYNC'], default: 'SYNC', description: 'ASYNC returns after ImerTerm durable admission, never after model-side completion inference.' },
+          admission_timeout_ms: { type: 'integer', minimum: 100, maximum: 10000, default: 2000, description: 'Bounded wait for a durable admission decision. Timeout requires observation of the same task_id; never blind replay.' },
         },
         required: ['project_id', 'target_id', 'mutation_class', 'capability', 'working_directory', 'script'],
         additionalProperties: false,
@@ -103,6 +106,20 @@ export function getImerTermTools(): any[] {
       annotations: { title: 'ImerTerm RouterOS', readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     },
     { name: 'imerterm_task_show', description: 'Read durable ImerTerm task state by task_id.', inputSchema: taskSchema, annotations: { title: 'ImerTerm Task Show', readOnlyHint: true } },
+    {
+      name: 'imerterm_task_list',
+      description: 'Read the bounded, policy-scoped ImerTerm durable task projection. No SQL, raw payload, script, secret or parallel state store is exposed.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          project_id: { type: 'string' },
+          limit: { type: 'integer', minimum: 1, maximum: 100, default: 50 },
+          cursor: { type: 'string', maxLength: 256 },
+        },
+        required: ['project_id'], additionalProperties: false,
+      },
+      annotations: { title: 'ImerTerm Task List', readOnlyHint: true },
+    },
     {
       name: 'imerterm_task_wait',
       description: 'Poll governed TASK_SHOW client-side until terminal or a bounded local timeout. Timeout never cancels the remote task.',
@@ -147,8 +164,9 @@ function taskId(args: Record<string, unknown>): string {
 function responseResult(value: Record<string, unknown>): ServerResult {
   const candidates = [value, value.task, value.result].filter(v => v && typeof v === 'object' && !Array.isArray(v)) as Record<string, unknown>[];
   const unknown = candidates.some(v => v.state === 'UNKNOWN_OUTCOME');
-  const body = unknown ? { ...value, operational_guidance: {
-    schema: 'imermcp.operational_guidance/1', reason_code: 'UNKNOWN_OUTCOME_NO_REPLAY', retryable: false,
+  const admissionUnknown = value.status === 'ADMISSION_TIMEOUT_OBSERVE' || value.result_code === 'ADMISSION_TIMEOUT_NO_REPLAY';
+  const body = (unknown || admissionUnknown) ? { ...value, operational_guidance: {
+    schema: 'imermcp.operational_guidance/1', reason_code: unknown ? 'UNKNOWN_OUTCOME_NO_REPLAY' : 'ADMISSION_TIMEOUT_NO_REPLAY', retryable: false,
     next_allowed_action: 'Observe the existing task_id with imerterm_task_show and imerterm_task_journal; preserve the same durable identity.',
     prohibited_actions: ['Do not replay the mutation.', 'Do not submit the same intended mutation under a new task_id.', 'Do not infer success from transport exit status.'],
   }} : value;
@@ -201,9 +219,10 @@ function taskEnvelope(args: Record<string, unknown>, kind: string): Record<strin
   return { schema: 'imerterm.task/1', task_id: taskId(args), project_id: requiredString(args, 'project_id'), target_id: requiredString(args, 'target_id'), task_kind: kind, created_at_utc: createdAt };
 }
 async function runPowerShell(args: Record<string, unknown>): Promise<Record<string, unknown>> {
-  await requireCapabilities('imerterm.powershell_dispatch/1');
+  const mode = args.execution_mode === undefined ? 'SYNC' : requiredString(args, 'execution_mode');
+  if (mode !== 'SYNC' && mode !== 'ASYNC') throw new Error('execution_mode must be SYNC or ASYNC.');
   const task = taskEnvelope(args, 'POWERSHELL');
-  return await dispatchImerTerm({
+  const dispatch = {
     schema: 'imerterm.powershell_dispatch/1', task,
     working_directory: requiredString(args, 'working_directory'),
     capability: requiredString(args, 'capability'),
@@ -212,7 +231,15 @@ async function runPowerShell(args: Record<string, unknown>): Promise<Record<stri
     timeout_ms: optionalInt(args, 'timeout_ms', 300000),
     graceful_stop_ms: optionalInt(args, 'graceful_stop_ms', 5000),
     max_raw_output_bytes: optionalInt(args, 'max_raw_output_bytes', 1048576),
-  }, (optionalInt(args, 'timeout_ms', 300000) ?? 300000) + 15_000);
+  };
+  if (mode === 'SYNC') {
+    await requireCapabilities('imerterm.powershell_dispatch/1');
+    return await dispatchImerTerm(dispatch, (optionalInt(args, 'timeout_ms', 300000) ?? 300000) + 15_000);
+  }
+  const admissionTimeout = optionalInt(args, 'admission_timeout_ms', 2000) ?? 2000;
+  if (admissionTimeout < 100 || admissionTimeout > 10000) throw new Error('admission_timeout_ms must be between 100 and 10000.');
+  await requireCapabilities('imerterm.powershell_async_admission/1', 'powershell_async_admission_v1');
+  return await dispatchImerTerm({ schema: 'imerterm.powershell_async_admission/1', dispatch, admission_timeout_ms: admissionTimeout }, admissionTimeout + 15_000);
 }
 
 function requireCapabilityValue(caps: Record<string, unknown>, key: string, value: string, message: string): void {
@@ -334,6 +361,20 @@ async function taskControl(operation: 'TASK_SHOW' | 'TASK_CANCEL' | 'TASK_JOURNA
   await requireCapabilities(undefined, feature);
   return await controlImerTerm({ schema: 'imerterm.local_control/1', operation, task_id: id });
 }
+async function taskList(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  await requireCapabilities(undefined, 'task_control_v1');
+  await requireCapabilities(undefined, 'task_list_v1');
+  const projectId = requiredString(args, 'project_id');
+  const limit = optionalInt(args, 'limit', 50) ?? 50;
+  if (limit < 1 || limit > 100) throw new Error('limit must be between 1 and 100.');
+  const payload: Record<string, unknown> = { schema: 'imerterm.local_control/1', operation: 'TASK_LIST', project_id: projectId, limit };
+  if (args.cursor !== undefined) {
+    const cursor = requiredString(args, 'cursor');
+    if (cursor.length > 256) throw new Error('cursor must be at most 256 characters.');
+    payload.cursor = cursor;
+  }
+  return await controlImerTerm(payload);
+}
 async function waitForTask(args: Record<string, unknown>): Promise<Record<string, unknown>> {
   const id = requiredString(args, 'task_id');
   const pollSeconds = optionalInt(args, 'poll_seconds', 2) ?? 2;
@@ -379,6 +420,7 @@ export async function handleImerTermTool(name: string, rawArgs: unknown): Promis
       case 'imerterm_run_ssh': return responseResult(await runSsh(args));
       case 'imerterm_run_routeros': return responseResult(await runRouterOs(args));
       case 'imerterm_task_show': return responseResult(await taskControl('TASK_SHOW', requiredString(args, 'task_id')));
+      case 'imerterm_task_list': return responseResult(await taskList(args));
       case 'imerterm_task_wait': return responseResult(await waitForTask(args));
       case 'imerterm_task_cancel': return responseResult(await taskControl('TASK_CANCEL', requiredString(args, 'task_id')));
       case 'imerterm_task_journal': return responseResult(await taskControl('TASK_JOURNAL', requiredString(args, 'task_id')));
