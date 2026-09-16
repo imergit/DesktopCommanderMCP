@@ -44,11 +44,11 @@ try {
     IMERMCP_IMERTERM_LOCAL_ROOT: localRoot,
   });
   const listed = await shadow.listTools();
-  assert.equal(listed.tools.length, 38, 'enabled surface must be 30 RDC + 8 ImerTerm tools');
-  for (const name of ['imerterm_capabilities','imerterm_run_powershell','imerterm_run_ssh','imerterm_run_routeros','imerterm_task_show','imerterm_task_wait','imerterm_task_cancel','imerterm_task_journal']) {
+  assert.equal(listed.tools.length, 39, 'C2 enabled surface must be 30 RDC + 9 ImerTerm tools');
+  for (const name of ['imerterm_capabilities','imerterm_run_powershell','imerterm_run_ssh','imerterm_run_routeros','imerterm_task_show','imerterm_task_list','imerterm_task_wait','imerterm_task_cancel','imerterm_task_journal']) {
     assert.ok(listed.tools.some(t => t.name === name), `missing ${name}`);
   }
-  console.log('PASS additive 8-tool ImerTerm surface');
+  console.log('PASS additive 9-tool C2 ImerTerm surface');
 
   const capsResult = await shadow.callTool({ name: 'imerterm_capabilities', arguments: {} });
   assert.equal(capsResult.isError, undefined);
