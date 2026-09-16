@@ -1,0 +1,24 @@
+#!/usr/bin/env node
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+process.env.IMERMCP_ENABLE_IMERTERM='1';
+process.env.IMERMCP_IMERTERM_HOST_EXE=process.env.IMERMCP_TEST_IMERTERM_HOST_EXE;
+process.env.IMERMCP_IMERTERM_LOCAL_ROOT=process.env.IMERMCP_TEST_IMERTERM_LOCAL_ROOT;
+const { handleImerTermTool } = await import('../dist/imermcp-local/imerterm-tools.js');
+const body = r => r.structuredContent ?? JSON.parse(r.content.map(x=>x.text??'').join('\n'));
+const call = async (name,args={}) => body(await handleImerTermTool(name,args));
+const project='imermcp-c2-e2e', target='p53-c2-e2e', work=process.env.IMERMCP_TEST_IMERTERM_LOCAL_ROOT+'\\work';
+const caps=await call('imerterm_capabilities');
+assert.equal(caps.status,'CONTROL_OK'); assert.ok(caps.capabilities.features.includes('task_list_v1')); assert.ok(caps.capabilities.features.includes('powershell_async_admission_v1'));
+console.log('PASS direct E2E capabilities');
+const id=randomUUID(), created=new Date().toISOString();
+const base={task_id:id,created_at_utc:created,project_id:project,target_id:target,mutation_class:'NONE',capability:'POWERSHELL_EXEC',working_directory:work,script:"Start-Sleep -Milliseconds 800; Write-Output 'C2_DIRECT_OK'; exit 0",timeout_ms:10000,graceful_stop_ms:1000,max_raw_output_bytes:65536,execution_mode:'ASYNC',admission_timeout_ms:2000};
+const admitted=await call('imerterm_run_powershell',base); assert.equal(admitted.status,'ADMITTED'); assert.equal(admitted.task_id,id); console.log('PASS direct E2E durable admission');
+const list=await call('imerterm_task_list',{project_id:project,limit:10}); assert.equal(list.result_code,'TASK_LIST'); assert.ok(list.task_list.items.some(x=>x.task_id===id)); assert.ok(list.task_list.items.every(x=>x.project_id===project)); console.log('PASS direct E2E bounded LIST');
+const done=await call('imerterm_task_wait',{task_id:id,poll_seconds:1,wait_timeout_seconds:10}); assert.equal(done.task.terminal,true); assert.equal(done.task.state,'SUCCEEDED'); console.log('PASS direct E2E WAIT terminal');
+const journal=await call('imerterm_task_journal',{task_id:id}); assert.equal(journal.result_code,'TASK_JOURNAL'); assert.ok(journal.task_journal.events.length>=1 && journal.task_journal.events.length<=64); assert.ok(journal.task_journal.events.every(x=>!('script' in x)&&!('raw' in x)&&!('secret' in x))); console.log('PASS direct E2E bounded PowerShell JOURNAL metadata only');
+const exact=await call('imerterm_run_powershell',base); assert.equal(exact.task_id,id); assert.notEqual(exact.result_code,'TASK_INTENT_COLLISION'); console.log('PASS direct E2E exact retry preserves identity');
+const divergent=await call('imerterm_run_powershell',{...base,script:"Write-Output 'DIVERGENT_MUST_NOT_RUN'; exit 0"}); assert.equal(divergent.result_code,'TASK_INTENT_COLLISION'); console.log('PASS direct E2E divergent retry fails closed');
+const id2=randomUUID(); const admitted2=await call('imerterm_run_powershell',{...base,task_id:id2,created_at_utc:new Date().toISOString(),script:"Start-Sleep -Seconds 8; Write-Output 'CANCEL_TARGET'; exit 0",timeout_ms:15000}); assert.equal(admitted2.status,'ADMITTED');
+const cancelled=await call('imerterm_task_cancel',{task_id:id2}); assert.equal(cancelled.task.task_id,id2); const terminal2=await call('imerterm_task_wait',{task_id:id2,poll_seconds:1,wait_timeout_seconds:10}); assert.equal(terminal2.task.terminal,true); assert.ok(['CANCELLED','FAILED'].includes(terminal2.task.state)); console.log('PASS direct E2E cancel same durable identity');
+console.log('CHECKS=8 FAILURES=0'); console.log('IMERMCP_VNEXT_C2_DIRECT_E2E_PASS');
