@@ -1,0 +1,24 @@
+import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+const base = 'D:\\053.imermcp-c3-retention-e2e';
+process.env.IMERMCP_MATERIALIZATION_ROOT = path.join(base, 'materialized');
+process.env.IMERMCP_MATERIALIZATION_PROJECTS = 'ttltest';
+process.env.IMERMCP_MATERIALIZATION_RETENTION_SECONDS = '1';
+process.env.IMERMCP_MATERIALIZATION_SWEEP_INTERVAL_SECONDS = '1';
+process.env.IMERMCP_MATERIALIZATION_MAX_AGGREGATE_BYTES = '1048576';
+await fs.rm(base, { recursive: true, force: true });
+const { materializeFile } = await import('../dist/imermcp-local/file-materialization.js');
+const { getFileMaterializationTools } = await import('../dist/imermcp-local/file-materialization-tools.js');
+getFileMaterializationTools();
+const bytes = Buffer.from('ttl-bound');
+const sha = crypto.createHash('sha256').update(bytes).digest('hex');
+const result = await materializeFile({ request_id: 'ttl-1', project_id: 'ttltest', artifact_id: 'ttl', destination_name: 'ttl.bin', bytes_base64: bytes.toString('base64'), expected_byte_length: bytes.length, expected_sha256: sha });
+assert.equal(result.cleanup.owner, 'IMERMCP');
+assert.equal(result.cleanup.final, 'TTL_BOUNDED');
+await new Promise(resolve => setTimeout(resolve, 2300));
+let exists = true;
+try { await fs.stat(result.local_file.source_path); } catch (error) { if (error?.code === 'ENOENT') exists = false; else throw error; }
+assert.equal(exists, false);
+await fs.writeFile('c3-retention-janitor-report.json', `${JSON.stringify({ schema: 'imermcp.c3_retention_report/1', status: 'PASS', retention_seconds: 1, sweep_interval_seconds: 1, file_removed: true }, null, 2)}\n`, 'utf8');

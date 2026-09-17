@@ -41,7 +41,11 @@ export function getFileMaterializationTools(): any[] {
   }];
 }
 function jsonResult(body: Record<string, unknown>, isError = false): ServerResult {
-  return { content: [{ type: 'text', text: JSON.stringify(body, null, 2) }], structuredContent: body, ...(isError ? { isError: true } : {}) };
+  return {
+    content: [{ type: 'text', text: JSON.stringify(body, null, 2) }],
+    structuredContent: body,
+    ...(isError ? { isError: true } : {}),
+  };
 }
 
 export async function handleFileMaterializationTool(rawArgs: unknown): Promise<ServerResult> {
@@ -54,7 +58,9 @@ export async function handleFileMaterializationTool(rawArgs: unknown): Promise<S
     const body: Record<string, unknown> = {
       schema: 'imermcp.materialization_error/1',
       error_class: code,
-      message: error instanceof MaterializationError ? error.message : 'Materialization failed closed due to an internal filesystem error.',
+      message: error instanceof MaterializationError
+        ? error.message
+        : 'Materialization failed closed due to an internal filesystem error.',
       retryable: ['QUOTA_EXCEEDED', 'SOURCE_CHANGED'].includes(code),
       next_allowed_action: code === 'SOURCE_CHANGED'
         ? 'Re-observe the authorized source, compute a fresh size/hash and retry the same request_id only if the intended bytes are unchanged.'
