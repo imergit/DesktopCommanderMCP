@@ -5,6 +5,7 @@
 import './bootstrap.js';
 import { FilteredStdioServerTransport } from './custom-stdio.js';
 import { server, flushDeferredMessages } from './server.js';
+import { installFileMaterializationBoundary } from './imermcp-local/file-materialization-registration.js';
 import { commandManager } from './command-manager.js';
 import { configManager } from './config-manager.js';
 import { featureFlagManager } from './utils/feature-flags.js';
@@ -14,6 +15,8 @@ import { capture } from './utils/capture.js';
 import { logToStderr, logger } from './utils/logger.js';
 import { runRemote } from './npm-scripts/remote.js';
 import { ensureChromeAvailable } from './tools/pdf/markdown.js';
+
+installFileMaterializationBoundary(server);
 
 // Store messages to defer until after initialization
 const deferredMessages: Array<{ level: string, message: string }> = [];
