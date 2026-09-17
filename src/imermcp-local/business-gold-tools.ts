@@ -25,6 +25,13 @@ type Route = {
   required_constraints: string[];
 };
 
+type LiveEligibility = {
+  eligible: boolean;
+  reason_code: string;
+  missing_features?: string[];
+  target_id?: string;
+};
+
 const OPERATIONS: Record<Family, Record<string, Route>> = {
   capabilities_discovery: {
     DISCOVER: {
@@ -131,6 +138,7 @@ const OPERATIONS: Record<Family, Record<string, Route>> = {
 const emptySchema = { type: 'object', properties: {}, additionalProperties: false };
 const familyEnum = [...BUSINESS_GOLD_FAMILIES];
 const operationEnum = [...new Set(Object.values(OPERATIONS).flatMap(family => Object.keys(family)))];
+const imerTermFeatureConstraints = new Set(['artifact_staging_v1', 'structured_dispatch_v2', 'structured_runtime_catalog_v1']);
 
 export function getBusinessGoldTools(): any[] {
   return [
@@ -166,6 +174,44 @@ function result(body: Record<string, unknown>, isError = false): ServerResult {
   };
 }
 
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+function evaluateLiveImerTermEligibility(route: Route, live: ServerResult): LiveEligibility {
+  const body = objectValue(live.structuredContent);
+  const caps = objectValue(body?.capabilities);
+  const handshake = objectValue(body?.operational_handshake);
+  if (live.isError === true || !body || body.status !== 'CONTROL_OK' || body.result_code !== 'CAPABILITIES' || handshake?.accepted !== true || !caps) {
+    return { eligible: false, reason_code: 'LIVE_IMERTERM_CAPABILITIES_UNAVAILABLE' };
+  }
+
+  const features = stringArray(caps.features);
+  const requiredFeatures = route.required_constraints.filter(constraint => imerTermFeatureConstraints.has(constraint));
+  const missingFeatures = requiredFeatures.filter(feature => !features.includes(feature));
+  if (missingFeatures.length > 0) {
+    return { eligible: false, reason_code: 'LIVE_IMERTERM_REQUIRED_FEATURE_MISSING', missing_features: missingFeatures };
+  }
+
+  if (route.mode === 'V2_STRUCTURED' && !stringArray(caps.dispatch_schemas).includes('imerterm.bash_dispatch/2')) {
+    return { eligible: false, reason_code: 'LIVE_IMERTERM_STRUCTURED_V2_UNAVAILABLE' };
+  }
+
+  const targetConstraint = route.required_constraints.find(constraint => constraint.startsWith('target_id='));
+  if (targetConstraint) {
+    const targetId = targetConstraint.slice('target_id='.length);
+    if (!stringArray(caps.openssh_targets).includes(targetId)) {
+      return { eligible: false, reason_code: 'LIVE_IMERTERM_TARGET_UNAVAILABLE', target_id: targetId };
+    }
+  }
+
+  return { eligible: true, reason_code: 'LIVE_IMERTERM_ELIGIBLE' };
+}
+
 function staticSurface(): Record<string, unknown> {
   return {
     schema: 'imermcp.business_gold_capabilities/1',
@@ -179,6 +225,7 @@ function staticSurface(): Record<string, unknown> {
     },
     policy: {
       default_rule: 'CAPABILITIES_FIRST_SEMANTIC_FIRST',
+      live_state_rule: 'LIVE_STATE_MAY_ONLY_REDUCE_STATIC_ELIGIBILITY',
       no_automatic_v2_to_v1_fallback: true,
       unknown_outcome_automatic_replay: false,
       second_execution_authority_allowed: false,
@@ -193,7 +240,15 @@ function staticSurface(): Record<string, unknown> {
 export async function handleBusinessGoldTool(name: string, rawArgs: unknown): Promise<ServerResult> {
   if (name === BUSINESS_CAPABILITIES_TOOL) {
     const live = await handleImerTermTool('imerterm_capabilities', {});
-    return result({ ...staticSurface(), live_imerterm: live.structuredContent ?? null, live_imerterm_error: live.isError === true });
+    const liveBody = objectValue(live.structuredContent);
+    const liveHandshake = objectValue(liveBody?.operational_handshake);
+    const liveEligible = live.isError !== true && liveBody?.status === 'CONTROL_OK' && liveBody?.result_code === 'CAPABILITIES' && liveHandshake?.accepted === true;
+    return result({
+      ...staticSurface(),
+      live_imerterm: live.structuredContent ?? null,
+      live_imerterm_error: live.isError === true,
+      live_imerterm_eligible: liveEligible,
+    });
   }
   if (name !== BUSINESS_COMPOSE_TOOL) {
     return result({ schema: 'imermcp.business_gold_error/1', error_class: 'UNKNOWN_TOOL', message: `Unknown Business GOLD tool: ${name}` }, true);
@@ -213,11 +268,33 @@ export async function handleBusinessGoldTool(name: string, rawArgs: unknown): Pr
   if (family === 'raw_terminal_escape_hatch' && (typeof args.justification !== 'string' || args.justification.trim().length === 0)) {
     return result({ schema: 'imermcp.business_gold_error/1', error_class: 'RAW_ESCAPE_JUSTIFICATION_REQUIRED', message: 'Raw terminal is an explicit escape hatch and requires a non-empty justification.' }, true);
   }
+
   const route = OPERATIONS[family as Family][operation];
   const live = route.provider.includes('IMERTERM') ? await handleImerTermTool('imerterm_capabilities', {}) : null;
+  const liveEligibility = live ? evaluateLiveImerTermEligibility(route, live) : null;
+  if (liveEligibility && !liveEligibility.eligible) {
+    return result({
+      schema: 'imermcp.business_gold_plan/1',
+      status: 'INELIGIBLE_NO_EFFECT',
+      eligible: false,
+      eligibility: liveEligibility,
+      family,
+      operation,
+      route,
+      justification_recorded: family === 'raw_terminal_escape_hatch',
+      live_imerterm: live?.structuredContent ?? null,
+      live_imerterm_error: live?.isError === true,
+      next_action: null,
+      next_allowed_action: 'Refresh live ImerTerm capabilities and satisfy the reported prerequisite before invoking any executor.',
+      prohibited_actions: ['Do not invoke the executor while live eligibility is false.', 'Do not bypass ImerTerm with a parallel execution path.', 'Do not replay UNKNOWN_OUTCOME.', 'Do not auto-fallback from Structured V2 to raw V1.'],
+    });
+  }
+
   return result({
     schema: 'imermcp.business_gold_plan/1',
     status: 'COMPOSED_NO_EFFECT',
+    eligible: true,
+    eligibility: liveEligibility ?? { eligible: true, reason_code: 'STATIC_PROVIDER_ELIGIBLE' },
     family,
     operation,
     route,
