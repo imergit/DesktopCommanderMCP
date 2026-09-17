@@ -17,6 +17,7 @@ assert.equal(discovered.isError, undefined);
 assert.equal(discovered.structuredContent?.schema, 'imermcp.business_gold_capabilities/1');
 assert.equal(discovered.structuredContent?.status, 'VNEXT_C4_SHADOW');
 assert.equal(discovered.structuredContent?.live_imerterm_error, false);
+assert.equal(discovered.structuredContent?.live_imerterm_eligible, true);
 const live = discovered.structuredContent?.live_imerterm;
 assert.equal(live?.status, 'CONTROL_OK');
 assert.equal(live?.result_code, 'CAPABILITIES');
@@ -32,6 +33,8 @@ const gb10 = await handleBusinessGoldTool(BUSINESS_COMPOSE_TOOL, {
 });
 assert.equal(gb10.isError, undefined);
 assert.equal(gb10.structuredContent?.status, 'COMPOSED_NO_EFFECT');
+assert.equal(gb10.structuredContent?.eligible, true);
+assert.equal(gb10.structuredContent?.eligibility?.reason_code, 'LIVE_IMERTERM_ELIGIBLE');
 assert.equal(gb10.structuredContent?.route?.executor_tool, 'imerterm_run_ssh');
 assert.equal(gb10.structuredContent?.route?.effect_authority, 'IMERTERM');
 assert.equal(gb10.structuredContent?.route?.mode, 'V2_STRUCTURED');
@@ -46,6 +49,7 @@ const report = {
   gb10_advertised: live.capabilities.openssh_targets.includes('gb10'),
   required_features: ['artifact_staging_v1', 'structured_dispatch_v2', 'structured_runtime_catalog_v1'],
   composed_route: {
+    eligible: gb10.structuredContent.eligible,
     provider: gb10.structuredContent.route.provider,
     executor_tool: gb10.structuredContent.route.executor_tool,
     effect_authority: gb10.structuredContent.route.effect_authority,
