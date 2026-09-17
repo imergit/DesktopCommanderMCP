@@ -72,7 +72,7 @@ console.log('PASS C4 raw terminal remains explicit escape hatch requiring justif
 assert.match(source, /NO_V2_TO_V1_FALLBACK/);
 assert.match(source, /Do not auto-fallback from Structured V2 to raw V1/);
 assert.match(source, /Do not replay UNKNOWN_OUTCOME/);
-assert.match(source, /IMERTERM_HOST_LOCAL_MATERIALIZATION_ONLY/);
+assert.match(source, /IMERMCP_HOST_LOCAL_MATERIALIZATION_ONLY/);
 assert.match(source, /SOLE_EFFECT_TASK_COMPLETION_CANCELLATION_RECOVERY_AUTHORITY/);
 assert.doesNotMatch(source, /sqlite|SELECT\s|INSERT\s|UPDATE\s+tasks|Redis|RabbitMQ|Kafka|BullMQ/i);
 console.log('PASS C4 preserves fail-closed fallback/replay rules and introduces no parallel task storage/queue authority');
