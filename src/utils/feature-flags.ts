@@ -40,6 +40,16 @@ class FeatureFlagManager {
    * Initialize - load from cache and start background refresh
    */
   async initialize(): Promise<void> {
+    if (process.env.IMERMCP_ENABLE_IMERTERM === '1') {
+      // Private ImerMCP runtime must not depend on Desktop Commander remote flags.
+      // Resolve waiters explicitly so defensive callers remain non-blocking.
+      this.flags = {};
+      this.loadedFromCache = false;
+      if (this.resolveFreshFetch) this.resolveFreshFetch();
+      logger.info('External feature flags disabled in ImerMCP mode');
+      return;
+    }
+
     try {
       // Load from cache immediately (non-blocking)
       await this.loadFromCache();

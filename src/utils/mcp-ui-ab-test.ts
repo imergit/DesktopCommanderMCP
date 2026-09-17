@@ -66,6 +66,12 @@ export async function resolveMcpUiPreviewDecision(deps: McpUiPreviewDecisionDeps
 }
 
 export async function shouldShowMcpUiPreviews(): Promise<boolean> {
+  // ImerMCP is a private machine-first control plane. Optional Desktop Commander
+  // UI previews must never become a runtime dependency or remote A/B decision.
+  if (process.env.IMERMCP_ENABLE_IMERTERM === '1') {
+    return false;
+  }
+
   return resolveMcpUiPreviewDecision({
     getExistingAssignment: () => configManager.getValue(`abTest_${MCP_UI_EXPERIMENT_NAME}`),
     isFirstRun: () => configManager.isFirstRun(),
