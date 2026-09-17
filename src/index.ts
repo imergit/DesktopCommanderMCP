@@ -119,24 +119,27 @@ async function runServer() {
 
     deferLog('info', 'Connecting server...');
 
-    // Add handler for oninitialized to configure notifications based on client capabilities
-    server.oninitialized = async () => {
-      try {
-        transport.enableNotifications();
-        await flushDeferredMessages();
-        for (const msg of deferredMessages) {
-          if (msg.level === 'error') logger.error(msg.message);
-          else if (msg.level === 'warning') logger.warn(msg.message);
-          else logger.info(msg.message);
-        }
-        deferredMessages.length = 0;
-        await ensureChromeAvailable();
-      } catch (error) {
-        logger.error(`Post-initialization error: ${error instanceof Error ? error.message : String(error)}`);
+    // Set up event-driven initialization completion handler
+    server.oninitialized = () => {
+      // This callback is triggered after the client sends the "initialized" notification
+      // At this point, the MCP protocol handshake is fully complete
+      transport.enableNotifications();
+
+      // Flush all deferred messages from both index.ts and server.ts
+      while (deferredMessages.length > 0) {
+        const msg = deferredMessages.shift()!;
+        transport.sendLog('info', msg.message);
       }
+      flushDeferredMessages();
+
+      // Now we can send regular logging messages
+      transport.sendLog('info', 'Server connected successfully');
+      transport.sendLog('info', 'MCP fully initialized, all startup messages sent');
+
+      // Preemptively check/download Chrome for PDF generation (runs in background)
+      ensureChromeAvailable();
     };
 
-    // Connect the server to the stdio transport
     await server.connect(transport);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -173,6 +176,7 @@ runServer().catch(async (error) => {
     timestamp: new Date().toISOString(),
     message: `Fatal error running server: ${errorMessage}`
   }) + '\n');
+
 
   capture('run_server_fatal_error', {
     error: errorMessage
