@@ -172,7 +172,7 @@ function responseResult(value: Record<string, unknown>): ServerResult {
   }} : value;
   return { content: [{ type: 'text', text: JSON.stringify(body, null, 2) }], structuredContent: body };
 }
-function errorResult(error: unknown): ServerResult {
+function errorResult(error: unknown, taskContext?: { task_id: string; created_at_utc: string }): ServerResult {
   if (error instanceof OperationalGateError) {
     const body = error.gate as unknown as Record<string, unknown>;
     return { content: [{ type: 'text', text: JSON.stringify(body, null, 2) }], structuredContent: body, isError: true };
@@ -195,6 +195,10 @@ function errorResult(error: unknown): ServerResult {
         ? ['Do not bypass ImerTerm with a parallel execution path.', 'Do not change execution mode merely to bypass the error.']
         : ['Do not blindly replay.', 'Do not allocate a new task_id for the same intent.', 'Do not infer success from transport/control exit status.'],
   };
+  if (taskContext) {
+    body.task_id = taskContext.task_id;
+    body.created_at_utc = taskContext.created_at_utc;
+  }
   if (error instanceof ImerTermAdapterError) {
     if (error.exitCode !== undefined) body.exit_code = error.exitCode;
     if (error.nativeResponse !== undefined) body.native_response = error.nativeResponse;
@@ -214,9 +218,28 @@ async function requireCapabilities(schema?: string, feature?: string, targetKey?
   evaluateOperationalGate(caps, { dispatchSchema: schema, features: feature ? [feature] : undefined, targetKey, targetId });
   return caps;
 }
+function stabilizeEffectIdentity(args: Record<string, unknown>): Record<string, unknown> {
+  const mutation = requiredString(args, 'mutation_class');
+  const hasTaskId = args.task_id !== undefined;
+  const hasCreatedAt = args.created_at_utc !== undefined;
+  if (hasTaskId !== hasCreatedAt) {
+    throw new Error('task_id and created_at_utc must be supplied together.');
+  }
+  if (mutation !== 'NONE' && !hasTaskId) {
+    throw new Error('task_id and created_at_utc are required for PROJECT and PRIVILEGED dispatches.');
+  }
+  const stabilized = { ...args };
+  if (!hasTaskId) {
+    stabilized.task_id = randomUUID();
+    stabilized.created_at_utc = new Date().toISOString();
+  } else {
+    stabilized.task_id = taskId(args);
+    stabilized.created_at_utc = requiredString(args, 'created_at_utc');
+  }
+  return stabilized;
+}
 function taskEnvelope(args: Record<string, unknown>, kind: string): Record<string, unknown> {
-  const createdAt = args.created_at_utc === undefined ? new Date().toISOString() : requiredString(args, 'created_at_utc');
-  return { schema: 'imerterm.task/1', task_id: taskId(args), project_id: requiredString(args, 'project_id'), target_id: requiredString(args, 'target_id'), task_kind: kind, created_at_utc: createdAt };
+  return { schema: 'imerterm.task/1', task_id: taskId(args), project_id: requiredString(args, 'project_id'), target_id: requiredString(args, 'target_id'), task_kind: kind, created_at_utc: requiredString(args, 'created_at_utc') };
 }
 async function runPowerShell(args: Record<string, unknown>): Promise<Record<string, unknown>> {
   const mode = args.execution_mode === undefined ? 'SYNC' : requiredString(args, 'execution_mode');
@@ -412,8 +435,16 @@ async function operationalHandshake(): Promise<Record<string, unknown>> {
 
 export async function handleImerTermTool(name: string, rawArgs: unknown): Promise<ServerResult> {
   if (!isImerTermEnabled()) return errorResult(new ImerTermAdapterError('DISABLED', 'ImerTerm adapter is not enabled.'));
+  let taskContext: { task_id: string; created_at_utc: string } | undefined;
   try {
-    const args = name === 'imerterm_capabilities' ? {} : asObject(rawArgs);
+    let args = name === 'imerterm_capabilities' ? {} : asObject(rawArgs);
+    if (name === 'imerterm_run_powershell' || name === 'imerterm_run_ssh' || name === 'imerterm_run_routeros') {
+      args = stabilizeEffectIdentity(args);
+      taskContext = {
+        task_id: requiredString(args, 'task_id'),
+        created_at_utc: requiredString(args, 'created_at_utc'),
+      };
+    }
     switch (name) {
       case 'imerterm_capabilities': return responseResult(await operationalHandshake());
       case 'imerterm_run_powershell': return responseResult(await runPowerShell(args));
@@ -427,6 +458,6 @@ export async function handleImerTermTool(name: string, rawArgs: unknown): Promis
       default: return errorResult(new ImerTermAdapterError('UNKNOWN_TOOL', `Unknown ImerTerm tool: ${name}`));
     }
   } catch (error) {
-    return errorResult(error);
+    return errorResult(error, taskContext);
   }
 }
